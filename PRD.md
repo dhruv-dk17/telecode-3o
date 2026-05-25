@@ -130,3 +130,28 @@ The **VS Code Extension Sync** is the "Killer Feature." Without it, Telecode is 
 *   **Branch Isolation:** Enforced at the API level.
 *   **Secret Protection:** Automated filtering of `.env` and sensitive keys from AI context.
 *   **Scoped Permissions:** Least-privilege GitHub tokens (only repo write, no admin access).
+
+---
+
+## 12. Telecode v2.0: The Autonomous Agent Bridge (Manus AI Era)
+
+Telecode v2.0 upgrades the system from a single-prompt generator into an autonomous agent orchestrator. Instead of merely writing code and sending it to GitHub, the AI acts as an autonomous loop—planning, acting in a sandbox, observing results, and correcting build or test issues before pushing verified changes.
+
+### 12.1 The Bridge Mental Model
+Rather than building AI models or developer sandboxes from scratch, Telecode acts as the "orchestration nervous system" connecting existing, high-fidelity components:
+*   **AI Planner:** Google Gemini (migrated to `gemini-3-flash-preview` for native Tool Calling / Function Calling).
+*   **Sandbox execution:** Ephemeral cloud containers via **E2B.dev** with a resilient **local sandbox fallback** using sub-process separation in the workstation's `/scratch/sandbox/` folder.
+*   **Version Control:** GitHub API for automated, non-destructive branches and PR creation.
+*   **Human Control Centers:** Telegram Bot (mobile control) and Antigravity IDE Live Webview Panel (desktop sync).
+
+### 12.2 The 8-Bridge Component Architecture
+
+1.  **Bridge 1 — Gemini Function Calling (Tool Registry):** Exposes atomic functions (`read_file`, `write_file`, `run_command`, `search_codebase`, `search_web`, `create_pull_request`) to Gemini. Gemini invokes these directly as JSON-formatted tool calls.
+2.  **Bridge 2 — Sandbox Execution Environment:** Executes command tools and writes files in a highly isolated, ephemeral environment, completely protecting the user's primary project state.
+3.  **Bridge 3 — Agentic Loop (Plan ➔ Act ➔ Observe ➔ Repeat):** An execution controller that handles Gemini responses, executes requested tool functions, feeds outcomes back into chat history, and loops until the task is successfully implemented and verified.
+4.  **Bridge 4 — Streaming Progress:** Real-time progress updates pushed to Telegram (editing status cards live) and streamed over WebSockets to active IDE panels.
+5.  **Bridge 5 — IDE Live Panel:** A VS Code/Antigravity extension webview panel displaying real-time agent thoughts, diff Hunks with single-click accept/reject controls, and interactive steering.
+6.  **Bridge 6 — Semantic Memory:** Seamless Postgres vector database (pgvector / Supabase) integration keeping a dynamic index of historical goals, solutions, and codebase layouts.
+7.  **Bridge 7 — Web Research Tool:** Integration of Tavily API to let the agent autonomously research documentation and API modifications.
+8.  **Bridge 8 — Risk-Gated Approvals:** Safeguard mechanisms pausing execution for HIGH-risk actions (e.g. key structural deletions, credentials writing, external API calls with monetary costs) to await user verification.
+

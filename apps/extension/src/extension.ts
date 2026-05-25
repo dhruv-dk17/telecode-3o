@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { AuthManager } from './auth';
 import { TaskExplorerProvider } from './taskExplorer';
 import { TelecodeApi } from './api';
+import { sseClient } from './sseClient';
+import { AgentPanelProvider } from './agentPanel';
 
 // ── Auto-sync polling ──────────────────────────────────────────────────────
 // Polls the server every 30 seconds when authenticated.
@@ -78,6 +80,17 @@ export function activate(context: vscode.ExtensionContext) {
 
   vscode.window.registerTreeDataProvider('telecode-tasks', taskExplorerProvider);
 
+  // Initialize the Sidebar Webview provider
+  const agentPanelProvider = new AgentPanelProvider(context.extensionUri);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(AgentPanelProvider.viewType, agentPanelProvider)
+  );
+
+  // Pipe progress events directly into the Webview provider
+  sseClient.onProgress((event) => {
+    agentPanelProvider.handleProgressEvent(event);
+  });
+
   // ── Commands ─────────────────────────────────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand('telecode.connect', async () => {
@@ -86,16 +99,26 @@ export function activate(context: vscode.ExtensionContext) {
         taskExplorerProvider.refresh();
         // Clear last seen so we don't skip the first completed task
         await context.globalState.update(LAST_SEEN_TASK_KEY, undefined);
+        const token = await auth.getToken();
+        if (token) {
+          const apiUrl = vscode.workspace.getConfiguration('telecode').get<string>('apiUrl') || 'http://localhost:3005/api';
+          sseClient.connect(apiUrl, token);
+        }
       }
     }),
 
     vscode.commands.registerCommand('telecode.disconnect', async () => {
       await auth.disconnect();
       taskExplorerProvider.refresh();
+      sseClient.disconnect();
     }),
 
     vscode.commands.registerCommand('telecode.refreshTasks', () => {
       taskExplorerProvider.refresh();
+    }),
+
+    vscode.commands.registerCommand('telecode.getToken', async () => {
+      return await auth.getToken();
     }),
 
     vscode.commands.registerCommand('telecode.viewTask', (task: any) => {
@@ -119,8 +142,17 @@ export function activate(context: vscode.ExtensionContext) {
       taskExplorerProvider.refresh();
       const syncDisposable = startAutoSync(context, auth, api, taskExplorerProvider);
       context.subscriptions.push(syncDisposable);
+      
+      auth.getToken().then(token => {
+        if (token) {
+          const apiUrl = vscode.workspace.getConfiguration('telecode').get<string>('apiUrl') || 'http://localhost:3005/api';
+          sseClient.connect(apiUrl, token);
+        }
+      });
     }
   });
 }
 
-export function deactivate() {}
+export function deactivate() {
+  sseClient.disconnect();
+}

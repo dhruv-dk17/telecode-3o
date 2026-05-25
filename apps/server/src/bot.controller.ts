@@ -8,15 +8,20 @@ import {
   HttpStatus,
   Query,
   Res,
+  Sse,
+  MessageEvent,
 } from '@nestjs/common';
 import * as express from 'express';
 import axios from 'axios';
+import { Observable } from 'rxjs';
+import { map, filter } from 'rxjs/operators';
 import { UsersService } from './users/users.service';
 import { RepositoriesService } from './repositories/repositories.service';
 import { TasksService, CreateTaskDto } from './tasks/tasks.service';
 import { WorkerService } from './worker/worker.service';
 import { SyncCodesService } from './users/sync-codes.service';
 import { SessionsService } from './sessions/sessions.service';
+import { ProgressService } from './progress/progress.service';
 import { TaskMode, TaskStatus } from '@prisma/client';
 
 
@@ -62,6 +67,7 @@ export class BotController {
     private readonly worker: WorkerService,
     private readonly syncCodes: SyncCodesService,
     private readonly sessions: SessionsService,
+    private readonly progressService: ProgressService,
   ) {}
 
   // ─ Users ─────────────────────────────────────────────────────────────────
@@ -450,5 +456,68 @@ export class BotController {
         </html>
       `);
     }
+  }
+
+  // ─ Streaming Progress ──────────────────────────────────────────────────────
+
+  @Post('progress')
+  @HttpCode(HttpStatus.CREATED)
+  async emitProgress(
+    @Body()
+    body: {
+      userId: string;
+      taskId: string;
+      step: number;
+      label: string;
+      status: 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+      output?: string;
+    },
+  ) {
+    this.progressService.emitProgress(body);
+    return { ok: true };
+  }
+
+  @Post('tasks/:id/steer')
+  @HttpCode(HttpStatus.OK)
+  async postSteer(
+    @Param('id') id: string,
+    @Body() body: { userId: string; text: string },
+  ) {
+    this.progressService.setSteering(id, body.text);
+    return { ok: true };
+  }
+
+  @Get('tasks/:id/steer')
+  async getSteer(@Param('id') id: string) {
+    const text = this.progressService.getAndClearSteering(id);
+    return { steer: text };
+  }
+
+  @Post('tasks/:id/approve')
+  @HttpCode(HttpStatus.OK)
+  async postApprove(
+    @Param('id') id: string,
+    @Body() body: { userId: string; approved: boolean },
+  ) {
+    this.progressService.setApproval(id, body.approved);
+    return { ok: true };
+  }
+
+  @Get('tasks/:id/approval')
+  async getApproval(@Param('id') id: string) {
+    const approved = this.progressService.getAndClearApproval(id);
+    return { approved };
+  }
+
+  @Sse('progress/stream/:token')
+  async streamProgress(@Param('token') token: string): Promise<Observable<MessageEvent>> {
+    const user = await this.users.findByApiToken(token);
+    const userId = user ? user.id : 'invalid';
+    return this.progressService.getProgressStream().pipe(
+      filter((event) => event.userId === userId),
+      map((event) => ({
+        data: event,
+      } as MessageEvent)),
+    );
   }
 }

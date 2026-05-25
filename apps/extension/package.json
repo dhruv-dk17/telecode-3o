@@ -42,6 +42,11 @@
         {
           "id": "telecode-tasks",
           "name": "Active Tasks"
+        },
+        {
+          "id": "telecode-agent",
+          "type": "webview",
+          "name": "Autonomous Agent Panel"
         }
       ]
     },

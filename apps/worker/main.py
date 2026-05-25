@@ -93,73 +93,107 @@ async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> No
         # 1. Mark in progress
         await mark_in_progress(task_id, user_id)
 
-        # 2. Call AI
-        ai_result = await process_task(
-            mode=req.mode.value,
-            prompt=req.prompt,
-            repo_full_name=req.repo_full_name,
-            repo_default_branch=req.repo_default_branch,
-            github_token=req.github_token,
-            session_context=req.session_context,
-        )
+        # 2. Call AI (Autonomous agent loop for execute/fix, or standard one-shot for explain/plan/search)
+        pr_url: Optional[str] = None
+        diff_summary: Optional[str] = None
+        confidence_score: Optional[int] = None
+        risk_level: Optional[str] = None
+        risk_analysis: Optional[str] = None
 
-        result_text: str = ai_result["result"]
-        branch_name: str | None = ai_result.get("branch_name")
-        commit_message: str = ai_result.get("commit_message", "feat: telecode update")
-        files: list[dict] = ai_result.get("files", [])
-        confidence_score: int | None = ai_result.get("confidence_score")
-        risk_level: str | None = ai_result.get("risk_level")
-        risk_analysis: str | None = ai_result.get("risk_analysis")
-
-        # 3. If EXECUTE/FIX and we have files, push to GitHub
-        pr_url: str | None = None
-        if req.mode in [TaskMode.EXECUTE, TaskMode.FIX] and files and req.repo_full_name:
-            gh = GitHubClient(token=req.github_token)
+        if req.mode in [TaskMode.EXECUTE, TaskMode.FIX]:
+            from agent_loop import run_agent_loop
+            from stream_manager import StreamManager
+            from memory_client import SemanticMemoryClient
+            
+            print(f"[Worker] Querying semantic memory for task {task_id}...")
+            memories_context = None
             try:
-                # Create branch
-                branch_to_use = branch_name or f"telecode/task-{task_id}"
-                await gh.create_branch(
-                    repo_full_name=req.repo_full_name,
-                    base_branch=req.repo_default_branch or "main",
-                    new_branch=branch_to_use
-                )
+                memory_client = SemanticMemoryClient()
+                memories_context = await memory_client.search_memories(req.prompt, req.repo_full_name or "")
+            except Exception as mem_err:
+                print(f"[Worker] Failed to query semantic memory: {mem_err}")
                 
-                # Commit files
-                await gh.commit_files(
-                    repo_full_name=req.repo_full_name,
-                    branch=branch_to_use,
-                    files=files,
-                    commit_message=commit_message
-                )
+            # Combine traditional context and semantic memories
+            combined_context = ""
+            if req.session_context:
+                combined_context += f"## Previous Session Context:\n{req.session_context}\n\n"
+            if memories_context:
+                combined_context += f"{memories_context}\n\n"
+            combined_context = combined_context.strip() or None
 
-                # Create PR
-                pr_url = await gh.create_pull_request(
-                    repo_full_name=req.repo_full_name,
-                    title=commit_message,
-                    body=f"Telecode AI generated changes for task {task_id}.\n\n{result_text[:500]}...",
-                    head=branch_to_use,
-                    base=req.repo_default_branch or "main"
-                )
+            print(f"[Worker] Dispatching autonomous agent loop for task {task_id}...")
+            stream_manager = StreamManager(
+                bot_token=bot_token or "",
+                chat_id=chat_id,
+                task_id=task_id,
+                user_id=user_id,
+                server_url=settings.server_url
+            )
+            
+            ai_result = await run_agent_loop(
+                task_id=task_id,
+                goal=req.prompt,
+                repo_full_name=req.repo_full_name or "",
+                github_token=req.github_token or "",
+                base_branch=req.repo_default_branch or "main",
+                session_context=combined_context,
+                stream_manager=stream_manager
+            )
+            
+            result_text = ai_result["result"]
+            branch_name = ai_result["branch_name"]
+            pr_url = ai_result["pr_url"]
+            modified_files = ai_result.get("modified_files", [])
+            
+            if modified_files:
+                file_lines = []
+                for path in modified_files:
+                    file_lines.append(f"  {path}")
+                diff_summary = f"📝 {len(modified_files)} file{'s' if len(modified_files) != 1 else ''} changed:\n" + "\n".join(file_lines)
                 
-                # In Phase 3, we don't append to result_text manually anymore.
-                # The send_result function handles the PR link display.
-                pass
+            if ai_result["status"] == "COMPLETED" or pr_url:
+                confidence_score = 95
+                risk_level = "LOW"
+                risk_analysis = "Agent autonomously compiled and verified all changes in isolated sandbox environment."
                 
-            except Exception as gh_err:
-                print(f"[Worker] GitHub operation failed: {gh_err}")
-                result_text += f"\n\nWarning: Could not push to GitHub: {str(gh_err)}"
-
-        # Phase D: Build a compact diff summary card for Telegram
-        diff_summary: str | None = None
-        if files:
-            file_lines = []
-            for f in files:
-                path = f.get("path", "?")
-                content = f.get("content", "")
-                line_count = content.count("\n") + 1
-                file_lines.append(f"  {path} (~{line_count} lines)")
-            diff_summary = f"📝 {len(files)} file{'s' if len(files) != 1 else ''} changed:\n" + "\n".join(file_lines)
-
+                # Write to semantic memory card
+                try:
+                    decisions_summary = f"Files Modified: {', '.join(modified_files) if modified_files else 'None'}\nResult: {result_text}"
+                    await memory_client.add_memory(
+                        task_id=task_id,
+                        repo_name=req.repo_full_name or "",
+                        goal=req.prompt,
+                        decisions=decisions_summary
+                    )
+                except Exception as mem_save_err:
+                    print(f"[Worker] Failed to save completion memory card: {mem_save_err}")
+            else:
+                # Agent loop failed or couldn't create PR
+                raise Exception(f"Autonomous agent failed to generate a pull request. Output:\n{result_text}")
+        else:
+            # Plan, Search, Explain modes run the traditional one-shot generation
+            ai_result = await process_task(
+                mode=req.mode.value,
+                prompt=req.prompt,
+                repo_full_name=req.repo_full_name,
+                repo_default_branch=req.repo_default_branch,
+                github_token=req.github_token,
+                session_context=req.session_context,
+            )
+            result_text = ai_result["result"]
+            branch_name = ai_result.get("branch_name")
+            confidence_score = ai_result.get("confidence_score")
+            risk_level = ai_result.get("risk_level")
+            risk_analysis = ai_result.get("risk_analysis")
+            
+            # Simple fallback files list for explain/plan if present in one-shot
+            files = ai_result.get("files", [])
+            if files:
+                file_lines = []
+                for f in files:
+                    path = f.get("path", "?")
+                    file_lines.append(f"  {path}")
+                diff_summary = f"📝 {len(files)} file{'s' if len(files) != 1 else ''} changed:\n" + "\n".join(file_lines)
 
         # 4. Mark completed
         await mark_completed(

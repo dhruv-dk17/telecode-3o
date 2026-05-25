@@ -23,7 +23,7 @@ def _get_client() -> genai.Client:
     return _client
 
 
-MODEL = "gemini-2.0-flash"  # Fast, cost-effective; swap to gemini-1.5-pro for deeper reasoning
+MODEL = "gemini-3-flash-preview"  # Fast, cost-effective; swap to gemini-3-pro-preview for deeper reasoning
 
 
 # ── Security: Sensitive path filter ─────────────────────────────────────────

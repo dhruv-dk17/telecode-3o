@@ -325,6 +325,28 @@ bot.action(/^exec_cancel:(.+)$/, async (ctx) => {
   await ctx.editMessageText('❌ Execution cancelled.');
 });
 
+bot.action(/^approve_task:(.+)$/, async (ctx) => {
+  const taskId = ctx.match[1];
+  await ctx.answerCbQuery('Approved.');
+  try {
+    await api.approveTask(taskId, true);
+    await ctx.editMessageText('✅ <b>Action Approved:</b> The AI has been allowed to proceed with the high-risk change.', { parse_mode: 'HTML' });
+  } catch (err: any) {
+    await ctx.reply(`❌ Error sending approval: ${err.message}`);
+  }
+});
+
+bot.action(/^deny_task:(.+)$/, async (ctx) => {
+  const taskId = ctx.match[1];
+  await ctx.answerCbQuery('Denied.');
+  try {
+    await api.approveTask(taskId, false);
+    await ctx.editMessageText('❌ <b>Action Denied:</b> The AI was blocked from performing the high-risk change.', { parse_mode: 'HTML' });
+  } catch (err: any) {
+    await ctx.reply(`❌ Error sending denial: ${err.message}`);
+  }
+});
+
 bot.action(/^exec_confirm:(.+)$/, async (ctx) => {
   const pendingId = ctx.match[1];
   const pending = pendingExecutions.get(pendingId);

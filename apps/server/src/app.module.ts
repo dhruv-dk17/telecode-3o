@@ -7,6 +7,7 @@ import { RepositoriesModule } from './repositories/repositories.module';
 import { TasksModule } from './tasks/tasks.module';
 import { WorkerModule } from './worker/worker.module';
 import { SessionsModule } from './sessions/sessions.module';
+import { ProgressModule } from './progress/progress.module';
 import { BotController } from './bot.controller';
 
 @Module({
@@ -17,6 +18,7 @@ import { BotController } from './bot.controller';
     TasksModule,
     WorkerModule,
     SessionsModule,
+    ProgressModule,
   ],
   controllers: [AppController, BotController],
   providers: [AppService],

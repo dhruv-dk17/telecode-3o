@@ -90,4 +90,12 @@ export class ApiService {
     const res = await this.http.post('/bot/sync/generate', { userId });
     return res.data.code;
   }
+
+  async approveTask(taskId: string, approved: boolean) {
+    const res = await this.http.post(`/bot/tasks/${taskId}/approve`, {
+      userId: 'bot-override',
+      approved,
+    });
+    return res.data;
+  }
 }
