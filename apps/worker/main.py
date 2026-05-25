@@ -20,6 +20,8 @@ from ai_engine import process_task
 from server_client import mark_in_progress, mark_completed, mark_failed
 from telegram_notifier import send_result
 from github_client import GitHubClient
+import httpx
+
 
 
 # ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -48,6 +50,32 @@ def _verify_secret(x_worker_secret: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid worker secret")
 
 
+# ─── Session memory helper ────────────────────────────────────────────────────
+
+async def _append_session(
+    user_id: str,
+    mode: str,
+    prompt: str,
+    result_summary: str,
+    branch: str | None,
+) -> None:
+    """Persist a completed task summary to the server's session memory store."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.server_url}/bot/session/append",
+                json={
+                    "userId": user_id,
+                    "mode": mode,
+                    "prompt": prompt,
+                    "result_summary": result_summary,
+                    "branch": branch,
+                },
+            )
+    except Exception as e:
+        print(f"[Session] Failed to append session memory: {e}")
+
+
 # ─── Background task runner ───────────────────────────────────────────────────
 
 async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> None:
@@ -71,17 +99,22 @@ async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> No
             prompt=req.prompt,
             repo_full_name=req.repo_full_name,
             repo_default_branch=req.repo_default_branch,
+            github_token=req.github_token,
+            session_context=req.session_context,
         )
 
         result_text: str = ai_result["result"]
         branch_name: str | None = ai_result.get("branch_name")
         commit_message: str = ai_result.get("commit_message", "feat: telecode update")
         files: list[dict] = ai_result.get("files", [])
+        confidence_score: int | None = ai_result.get("confidence_score")
+        risk_level: str | None = ai_result.get("risk_level")
+        risk_analysis: str | None = ai_result.get("risk_analysis")
 
         # 3. If EXECUTE/FIX and we have files, push to GitHub
         pr_url: str | None = None
         if req.mode in [TaskMode.EXECUTE, TaskMode.FIX] and files and req.repo_full_name:
-            gh = GitHubClient()
+            gh = GitHubClient(token=req.github_token)
             try:
                 # Create branch
                 branch_to_use = branch_name or f"telecode/task-{task_id}"
@@ -116,11 +149,32 @@ async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> No
                 print(f"[Worker] GitHub operation failed: {gh_err}")
                 result_text += f"\n\nWarning: Could not push to GitHub: {str(gh_err)}"
 
+        # Phase D: Build a compact diff summary card for Telegram
+        diff_summary: str | None = None
+        if files:
+            file_lines = []
+            for f in files:
+                path = f.get("path", "?")
+                content = f.get("content", "")
+                line_count = content.count("\n") + 1
+                file_lines.append(f"  {path} (~{line_count} lines)")
+            diff_summary = f"📝 {len(files)} file{'s' if len(files) != 1 else ''} changed:\n" + "\n".join(file_lines)
+
+
         # 4. Mark completed
         await mark_completed(
             task_id, user_id,
             result=result_text,
             branch_name=branch_name,
+        )
+
+        # 4b. Write session memory entry so future tasks have context
+        await _append_session(
+            user_id=user_id,
+            mode=req.mode.value,
+            prompt=req.prompt,
+            result_summary=result_text[:200].replace('\n', ' '),
+            branch=branch_name,
         )
 
         # 5. Notify user via Telegram
@@ -132,6 +186,10 @@ async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> No
                 result=result_text,
                 branch_name=branch_name,
                 pr_url=pr_url,
+                confidence_score=confidence_score,
+                risk_level=risk_level,
+                risk_analysis=risk_analysis,
+                diff_summary=diff_summary,
             )
 
     except Exception as exc:

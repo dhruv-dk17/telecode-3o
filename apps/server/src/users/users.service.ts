@@ -39,5 +39,27 @@ export class UsersService {
       where: { apiToken },
     });
   }
+
+  async findById(id: string): Promise<User | null> {
+    return this.prisma.user.findUnique({
+      where: { id },
+    });
+  }
+
+  async updateGithubToken(telegramId: string, githubToken: string, githubLogin: string): Promise<User> {
+    const user = await this.prisma.user.findUnique({
+      where: { telegramId },
+    });
+    if (!user) {
+      throw new Error(`User not found with Telegram ID: ${telegramId}`);
+    }
+    return this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        githubToken,
+        githubLogin,
+      },
+    });
+  }
 }
 

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Task } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
 
 export interface DispatchOptions {
   task: Task;
@@ -9,7 +10,9 @@ export interface DispatchOptions {
   repoDefaultBranch?: string;
   botToken: string;
   chatId: string;
+  sessionContext?: string | null;
 }
+
 
 @Injectable()
 export class WorkerService {
@@ -17,10 +20,18 @@ export class WorkerService {
   private readonly workerUrl = process.env.WORKER_URL ?? 'http://localhost:8000';
   private readonly workerSecret = process.env.WORKER_SECRET ?? 'telecode-worker-secret-change-in-prod';
 
-  constructor(private readonly http: HttpService) {}
+  constructor(
+    private readonly http: HttpService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   async dispatch(opts: DispatchOptions): Promise<boolean> {
-    const { task, repoFullName, repoDefaultBranch, botToken, chatId } = opts;
+    const { task, repoFullName, repoDefaultBranch, botToken, chatId, sessionContext } = opts;
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: task.userId },
+      select: { githubToken: true },
+    });
 
     const payload = {
       task_id: task.id,
@@ -29,6 +40,8 @@ export class WorkerService {
       prompt: task.prompt,
       repo_full_name: repoFullName ?? null,
       repo_default_branch: repoDefaultBranch ?? null,
+      github_token: user?.githubToken ?? null,
+      session_context: sessionContext ?? null,
     };
 
     let retries = 3;
@@ -47,6 +60,7 @@ export class WorkerService {
         );
         this.logger.log(`✅ Successfully dispatched task ${task.id} (${task.mode}) to worker. Status: ${response.status}`);
         return true;
+
       } catch (err: any) {
         retries--;
         const status = err?.response?.status;

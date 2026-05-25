@@ -20,18 +20,28 @@ export class TelecodeApi {
 
   async getTasks(token: string): Promise<any[]> {
     try {
-      // For now, using the bot endpoint to list tasks. 
-      // In a real app, we might have a dedicated /api/tasks endpoint.
-      // We need to pass the token in headers if we had auth middleware.
-      // For this MVP, we'll assume the token can be exchanged for a userId or similar.
-      
-      // Let's assume the exchange returns an "apiToken" which is just the userId for now
-      // since the server doesn't have full JWT auth yet.
       const response = await axios.get(`${this.baseUrl}/bot/tasks/token/${token}`);
       return response.data.tasks || [];
     } catch (error) {
       console.error('Telecode API Error (GetTasks):', error);
       return [];
+    }
+  }
+
+  /**
+   * Returns the most recently COMPLETED task for the user, or null.
+   * Used by the auto-sync poller to detect new AI-generated changes.
+   */
+  async getLatestCompletedTask(token: string): Promise<any | null> {
+    try {
+      const tasks: any[] = await this.getTasks(token);
+      const completed = tasks.filter(t => t.status === 'COMPLETED');
+      if (completed.length === 0) return null;
+      // Tasks are returned in desc order; first completed is most recent
+      return completed[0];
+    } catch (error) {
+      console.error('Telecode API Error (GetLatestCompleted):', error);
+      return null;
     }
   }
 }

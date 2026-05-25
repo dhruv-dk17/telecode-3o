@@ -392,6 +392,34 @@ bot.command('sync', async (ctx) => {
   }
 });
 
+/** /login — initiate GitHub OAuth login */
+bot.command(['login', 'auth'], async (ctx) => {
+  const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
+  if (!user) return ctx.reply('⚠️ Could not reach the server.');
+
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  const redirectUri = process.env.GITHUB_REDIRECT_URI;
+
+  if (!clientId || !redirectUri) {
+    return ctx.reply('⚠️ GitHub OAuth is not fully configured on the server.');
+  }
+
+  const telegramId = ctx.from.id;
+  const authUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${telegramId}&scope=repo`;
+
+  await ctx.reply(
+    `🔐 <b>GitHub Account Connection</b>\n\n` +
+    `Connect your GitHub account to allow Telecode to safely create branches, commit code, and open PRs on your behalf.\n\n` +
+    `Click the button below to authorize through GitHub securely:`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        Markup.button.url('🔑 Connect GitHub', authUrl),
+      ]),
+    }
+  );
+});
+
 /** /tasks — recent history */
 bot.command('tasks', async (ctx) => {
   const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
@@ -474,6 +502,7 @@ async function launch() {
       { command: 'execute', description: 'Apply code changes & open PR' },
       { command: 'tasks', description: 'View recent execution history' },
       { command: 'sync', description: 'Get code for VS Code extension' },
+      { command: 'login', description: 'Link your GitHub account securely' },
       { command: 'undo', description: 'Roll back the last execution' },
       { command: 'help', description: 'Show full command reference' },
     ]);

@@ -26,6 +26,41 @@ def _get_client() -> genai.Client:
 MODEL = "gemini-2.0-flash"  # Fast, cost-effective; swap to gemini-1.5-pro for deeper reasoning
 
 
+# ── Security: Sensitive path filter ─────────────────────────────────────────
+# These patterns are NEVER passed to the AI — not in the file tree, not as
+# file content. This prevents secret leakage even if the user asks for it.
+
+import re as _re
+
+_BLOCKED_PATTERNS = [
+    r"^\.env$",
+    r"^\.env\.",            # .env.local, .env.production, etc.
+    r".*\.pem$",
+    r".*\.key$",
+    r".*\.p12$",
+    r".*\.pfx$",
+    r".*\.secret$",
+    r".*\.cer$",
+    r".*id_rsa.*",
+    r".*id_ed25519.*",
+    r"^secrets/",
+    r"^\.secrets/",
+    r"^credentials/",
+    r".*password.*\.txt$",
+    r".*token.*\.txt$",
+]
+
+_BLOCKED_COMPILED = [_re.compile(p, _re.IGNORECASE) for p in _BLOCKED_PATTERNS]
+
+
+def _is_sensitive(path: str) -> bool:
+    """Return True if the file path matches any blocked pattern."""
+    for pattern in _BLOCKED_COMPILED:
+        if pattern.search(path):
+            return True
+    return False
+
+
 # ── System prompt templates ──────────────────────────────────────────────────
 
 _SYSTEM_BASE = """You are Telecode, an expert AI coding assistant embedded inside Telegram.
@@ -95,6 +130,9 @@ Output structure:
 {
   "branch": "telecode/short-description",
   "commit": "feat: description",
+  "confidence_score": 85,
+  "risk_level": "LOW",
+  "risk_analysis": "Brief 1-2 sentence explanation of what could go wrong and how to mitigate it.",
   "files": [
     {
       "path": "path/to/file.ts",
@@ -107,7 +145,10 @@ Output structure:
 CRITICAL: 
 - ALWAYS provide the FULL content of the file. 
 - If you are modifying an existing file, you MUST include all its original content plus your changes. 
-- Use valid JSON. Double check your quotes and braces."""
+- Use valid JSON. Double check your quotes and braces.
+- confidence_score: integer 0-100 (how confident you are the change is correct).
+- risk_level: one of LOW, MEDIUM, or HIGH.
+- risk_analysis: a concise 1-2 sentence plain-text risk summary."""
 
 _SYSTEM_FIX = _SYSTEM_BASE + """
 
@@ -131,6 +172,9 @@ Output structure:
 {
   "branch": "telecode/fix-description",
   "commit": "fix: description",
+  "confidence_score": 90,
+  "risk_level": "LOW",
+  "risk_analysis": "Brief 1-2 sentence explanation of potential side effects or edge cases.",
   "files": [
     {
       "path": "path/to/file.ts",
@@ -143,7 +187,10 @@ Output structure:
 CRITICAL: 
 - ALWAYS provide the FULL content of the file. 
 - If you are modifying an existing file, you MUST include all its original content plus your changes. 
-- Use valid JSON. Double check your quotes and braces."""
+- Use valid JSON. Double check your quotes and braces.
+- confidence_score: integer 0-100 (how confident you are the fix is correct).
+- risk_level: one of LOW, MEDIUM, or HIGH.
+- risk_analysis: a concise 1-2 sentence plain-text risk summary."""
 
 
 def _extract_json(text: str) -> dict | None:
@@ -194,10 +241,12 @@ async def process_task(
     prompt: str,
     repo_full_name: str | None = None,
     repo_default_branch: str | None = None,
+    github_token: str | None = None,
+    session_context: str | None = None,
 ) -> dict:
     """
     Send the task to Gemini and return a structured result dict.
-    Returns: { "result": str, "branch_name": str | None }
+    Returns: { "result": str, "branch_name": str | None, "confidence_score": int | None, ... }
     """
     client = _get_client()
 
@@ -214,12 +263,17 @@ async def process_task(
     gh = None
     if repo_full_name:
         from github_client import GitHubClient
-        gh = GitHubClient()
+        gh = GitHubClient(token=github_token)
         
         # 1. Always provide the file tree if we have a repo
         file_tree = []
         try:
-            file_tree = await gh.get_file_tree(repo_full_name, repo_default_branch)
+            raw_tree = await gh.get_file_tree(repo_full_name, repo_default_branch)
+            # 🔒 Security: strip sensitive files from what the AI ever sees
+            blocked = [f for f in raw_tree if _is_sensitive(f)]
+            file_tree = [f for f in raw_tree if not _is_sensitive(f)]
+            if blocked:
+                print(f"[Security] Blocked {len(blocked)} sensitive file(s) from AI context: {blocked}")
         except Exception as e:
             print(f"❌ Failed to fetch file tree for context: {str(e)}")
         
@@ -228,15 +282,19 @@ async def process_task(
 
         # 2. Automatically fetch high-priority files (README, package.json, etc.)
         high_priority = ["README.md", "package.json", "requirements.txt", "main.py", "index.ts"]
-        existing_high_priority = [f for f in high_priority if f in file_tree]
+        existing_high_priority = [f for f in high_priority if f in file_tree]  # already filtered
         
         # 3. Detect files mentioned in the prompt
         import re
         # Improved regex to catch paths like apps/server/src/main.ts or ./src/utils.js
         mentioned_files = re.findall(r"(?:(?:\./|/)?[\w\-]+(?:/[\w\-]+)*\.(?:ts|js|py|md|json|html|css|prisma|graphql|yml|yaml|txt))", prompt)
         
-        # Combine and deduplicate
-        files_to_read = list(set(existing_high_priority + [f.lstrip("./") for f in mentioned_files if f.lstrip("./") in file_tree]))
+        # Combine, deduplicate, and filter out any sensitive paths the user may have explicitly named
+        candidate_files = list(set(existing_high_priority + [f.lstrip("./") for f in mentioned_files if f.lstrip("./") in file_tree]))
+        files_to_read = [f for f in candidate_files if not _is_sensitive(f)]
+        skipped = [f for f in candidate_files if _is_sensitive(f)]
+        if skipped:
+            print(f"[Security] Blocked explicit fetch of sensitive file(s): {skipped}")
         
         if files_to_read:
             print(f"[AI Context] Fetching {len(files_to_read)} files for context: {files_to_read}")
@@ -249,6 +307,10 @@ async def process_task(
             if context_files:
                 files_str = "\n\n".join(context_files)
                 prompt = f"Relevant File Context:\n{files_str}\n\n---\n\n{prompt}"
+
+    # ─── Session Memory Injection ─────────────────────────────────────────────
+    if session_context:
+        prompt = f"## 🧠 Previous Session Memory\n{session_context}\n\n---\n\n{prompt}"
 
     context = _build_context(repo_full_name, repo_default_branch)
     user_message = f"{context}\n\n---\n\n{prompt}"
@@ -270,6 +332,10 @@ async def process_task(
     files_to_commit: list[dict] = []
     commit_message: str = "feat: telecode update"
 
+    confidence_score: int | None = None
+    risk_level: str | None = None
+    risk_analysis: str | None = None
+
     if mode in ["EXECUTE", "FIX"]:
         import re
         data = _extract_json(result_text)
@@ -277,6 +343,12 @@ async def process_task(
             branch_name = data.get("branch")
             commit_message = data.get("commit", commit_message)
             files_to_commit = data.get("files", [])
+            # Extract new confidence/risk fields
+            raw_score = data.get("confidence_score")
+            if isinstance(raw_score, (int, float)):
+                confidence_score = int(raw_score)
+            risk_level = data.get("risk_level")  # LOW | MEDIUM | HIGH
+            risk_analysis = data.get("risk_analysis")
 
         # Fallback for branch name if JSON parsing failed or was incomplete
         if not branch_name:
@@ -289,4 +361,7 @@ async def process_task(
         "branch_name": branch_name,
         "commit_message": commit_message,
         "files": files_to_commit,
+        "confidence_score": confidence_score,
+        "risk_level": risk_level,
+        "risk_analysis": risk_analysis,
     }
