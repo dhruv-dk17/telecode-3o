@@ -46,19 +46,20 @@ export class UsersService {
     });
   }
 
-  async updateGithubToken(telegramId: string, githubToken: string, githubLogin: string): Promise<User> {
-    const user = await this.prisma.user.findUnique({
-      where: { telegramId },
-    });
-    if (!user) {
-      throw new Error(`User not found with Telegram ID: ${telegramId}`);
-    }
+  async updateGithubConnection(userId: string, githubToken: string, githubLogin: string): Promise<User> {
     return this.prisma.user.update({
-      where: { id: user.id },
+      where: { id: userId },
       data: {
         githubToken,
         githubLogin,
       },
+    });
+  }
+
+  async updateGeminiApiKey(userId: string, geminiApiKey: string): Promise<User> {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { geminiApiKey },
     });
   }
 }

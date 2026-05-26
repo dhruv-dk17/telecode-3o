@@ -30,7 +30,7 @@ export class WorkerService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: task.userId },
-      select: { githubToken: true },
+      select: { githubToken: true, geminiApiKey: true },
     });
 
     const payload = {
@@ -41,6 +41,7 @@ export class WorkerService {
       repo_full_name: repoFullName ?? null,
       repo_default_branch: repoDefaultBranch ?? null,
       github_token: user?.githubToken ?? null,
+      gemini_api_key: user?.geminiApiKey ?? null,
       session_context: sessionContext ?? null,
     };
 

@@ -17,6 +17,7 @@ model User {
   lastName     String?
   githubToken  String?
   githubLogin  String?
+  geminiApiKey String?      // Stored user-specific Gemini API Key
   apiToken     String?      @unique
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
@@ -24,11 +25,21 @@ model User {
   sessions     Session[]
   tasks        Task[]
   syncCodes    SyncCode[]
+  oauthStates  OAuthState[]
 }
 
 model SyncCode {
   id        String   @id @default(uuid())
   code      String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model OAuthState {
+  id        String   @id @default(uuid())
+  token     String   @unique
   userId    String
   user      User     @relation(fields: [userId], references: [id])
   expiresAt DateTime

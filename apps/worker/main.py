@@ -7,6 +7,19 @@ Endpoints:
   POST /process/echo    — dev endpoint: echoes the prompt without calling Gemini
 """
 
+import sys
+# Force stdout/stderr to use UTF-8 on Windows to prevent UnicodeEncodeError with emojis
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+if sys.stderr.encoding != 'utf-8':
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
 import asyncio
 import os
 from contextlib import asynccontextmanager
@@ -15,7 +28,7 @@ from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from config import settings
-from models import ProcessTaskRequest, TaskMode
+from models import ProcessTaskRequest, TaskMode, ChatRequest
 from ai_engine import process_task
 from server_client import mark_in_progress, mark_completed, mark_failed
 from telegram_notifier import send_result
@@ -108,7 +121,7 @@ async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> No
             print(f"[Worker] Querying semantic memory for task {task_id}...")
             memories_context = None
             try:
-                memory_client = SemanticMemoryClient()
+                memory_client = SemanticMemoryClient(api_key=req.gemini_api_key)
                 memories_context = await memory_client.search_memories(req.prompt, req.repo_full_name or "")
             except Exception as mem_err:
                 print(f"[Worker] Failed to query semantic memory: {mem_err}")
@@ -137,7 +150,8 @@ async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> No
                 github_token=req.github_token or "",
                 base_branch=req.repo_default_branch or "main",
                 session_context=combined_context,
-                stream_manager=stream_manager
+                stream_manager=stream_manager,
+                gemini_api_key=req.gemini_api_key
             )
             
             result_text = ai_result["result"]
@@ -179,6 +193,7 @@ async def _run_task(req: ProcessTaskRequest, bot_token: str, chat_id: str) -> No
                 repo_default_branch=req.repo_default_branch,
                 github_token=req.github_token,
                 session_context=req.session_context,
+                gemini_api_key=req.gemini_api_key,
             )
             result_text = ai_result["result"]
             branch_name = ai_result.get("branch_name")
@@ -272,10 +287,10 @@ async def process(
     """
     _verify_secret(x_worker_secret)
 
-    if not settings.gemini_api_key:
+    if not req.gemini_api_key and not settings.gemini_api_key:
         raise HTTPException(
             status_code=503,
-            detail="GEMINI_API_KEY not configured on the worker."
+            detail="Gemini API Key is not configured. Please set one using /apikey in Telegram."
         )
 
     background_tasks.add_task(
@@ -321,6 +336,36 @@ async def process_echo(
         "mode": req.mode.value,
         "status": "COMPLETED",
     }
+
+@app.post("/chat")
+async def chat(
+    req: ChatRequest,
+    x_worker_secret: str | None = Header(default=None),
+):
+    """
+    Direct inline chat endpoint.
+    Processes the request synchronously using gemini-2.5-flash and returns the result.
+    """
+    _verify_secret(x_worker_secret)
+
+    api_key = req.gemini_api_key or settings.gemini_api_key
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Gemini API Key is not configured. Please set one using /apikey in Telegram."
+        )
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=req.prompt,
+        )
+        return {"result": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

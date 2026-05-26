@@ -45,6 +45,37 @@ function formatUser(u: { username?: string | null; firstName?: string | null }):
   return u.username ? `@${u.username}` : (u.firstName ?? 'there');
 }
 
+function maskApiKey(key?: string | null): string {
+  if (!key) return 'Not set';
+  if (key.length <= 10) return `${key.slice(0, 4)}...`;
+  return `${key.slice(0, 6)}...${key.slice(-4)}`;
+}
+
+async function sendLongMessage(ctx: any, text: string) {
+  const LIMIT = 4000;
+  if (text.length <= LIMIT) {
+    return ctx.reply(text, { parse_mode: 'Markdown' });
+  }
+
+  const lines = text.split('\n');
+  let currentChunk = '';
+
+  for (const line of lines) {
+    if (currentChunk.length + line.length + 1 > LIMIT) {
+      if (currentChunk.trim()) {
+        await ctx.reply(currentChunk, { parse_mode: 'Markdown' });
+      }
+      currentChunk = line + '\n';
+    } else {
+      currentChunk += line + '\n';
+    }
+  }
+
+  if (currentChunk.trim()) {
+    await ctx.reply(currentChunk, { parse_mode: 'Markdown' });
+  }
+}
+
 async function ensureUser(telegramId: number, from: any) {
   return api.registerUser({
     telegramId: String(telegramId),
@@ -59,6 +90,16 @@ async function ensureUser(telegramId: number, from: any) {
 bot.start(async (ctx) => {
   const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
   const name = user ? formatUser(user) : ctx.from.first_name;
+
+  if (user && !user.geminiApiKey) {
+    await ctx.reply(
+      `👋 Welcome to <b>Telecode</b>, ${name}!\n\n` +
+      `Before we begin, we need to set up your personal Gemini API Key so you can run AI tasks without shared cost limits.\n\n` +
+      `👉 **Please send your Gemini API Key** starting with <code>AIzaSy</code> as a text message right now to complete the setup.`,
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
 
   await ctx.reply(
     `👋 Welcome to <b>Telecode</b>, ${name}!\n\n` +
@@ -84,8 +125,11 @@ bot.help(async (ctx) => {
     `<b>Telecode — Command Reference</b>\n\n` +
     `<b>Context & Setup:</b>\n` +
     `📋 <b>/connect</b> [repo] — Link a GitHub repository\n` +
+    `✨ <b>/create</b> [name] [public|private] — Create a public/private repo & link it\n` +
     `📂 <b>/repos</b> — List linked repositories\n` +
-    `🔑 <b>/sync</b> — Get code for VS Code extension\n\n` +
+    `🪪 <b>/status</b> — Show your key, GitHub, and active repo status\n` +
+    `🔑 <b>/sync</b> — Get code for VS Code extension\n` +
+    `🔑 <b>/apikey</b> [key] — Set or view your Gemini API Key status\n\n` +
     `<b>AI Assistance (Read-only):</b>\n` +
     `🔍 <b>/explain</b> [query] — Analysis and explanations\n` +
     `🔎 <b>/search</b> [query] — Find files and logic\n\n` +
@@ -120,6 +164,95 @@ bot.command('connect', async (ctx) => {
   } catch (err: any) {
     await ctx.reply(`❌ Failed to connect: ${err?.response?.data?.message ?? err.message}`);
   }
+});
+
+bot.command('create', async (ctx) => {
+  const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
+  if (!user) return ctx.reply('⚠️ Could not reach the server.');
+
+  const args = ctx.message.text.split(' ').slice(1).map(s => s.trim()).filter(Boolean);
+  const repoName = args[0];
+  const visibility = args[1]?.toLowerCase();
+
+  if (!repoName) {
+    return ctx.reply('Usage: <code>/create repo-name [public|private]</code> (e.g. <code>/create my-fitness-app public</code>)', { parse_mode: 'HTML' });
+  }
+
+  // Validate repo name format (GitHub rules: only alphanumeric, hyphen, underscore, period)
+  const repoNameRegex = /^[a-zA-Z0-9._-]+$/;
+  if (!repoNameRegex.test(repoName)) {
+    return ctx.reply('❌ Invalid repository name. Use only alphanumeric characters, hyphens, underscores, or periods.');
+  }
+
+  const isPrivate = visibility !== 'public';
+  const visibilityText = isPrivate ? 'private' : 'public';
+
+  await ctx.reply(`✨ Creating a new ${visibilityText} repository <b>${repoName}</b> on GitHub...`, { parse_mode: 'HTML' });
+
+  try {
+    const repo = await api.createRepo(user.id, repoName, isPrivate);
+    await ctx.reply(
+      `🎉 Repository <b>${repo.fullName}</b> (${visibilityText}) created successfully on GitHub and connected to Telecode!\n\n` +
+      `You can now start planning or executing features immediately on this new canvas.`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err: any) {
+    await ctx.reply(`❌ Failed to create repository: ${err?.response?.data?.message ?? err.message}`);
+  }
+});
+
+bot.command('apikey', async (ctx) => {
+  const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
+  if (!user) return ctx.reply('⚠️ Could not reach the server.');
+
+  const arg = ctx.message.text.split(' ').slice(1).join('').trim();
+  if (!arg) {
+    const masked = maskApiKey(user.geminiApiKey);
+    return ctx.reply(
+      `<b>Gemini API Key Status</b>\n\n` +
+      `Current key: <code>${masked}</code>\n` +
+      `Source: <b>${user.geminiApiKey ? 'Your personal key' : 'No personal key set'}</b>\n\n` +
+      `To update it, use:\n<code>/apikey your-gemini-api-key</code>`,
+      { parse_mode: 'HTML' }
+    );
+  }
+
+  // Basic API key length check (Gemini API keys are typically ~39 characters starting with AIzaSy)
+  if (!arg.startsWith('AIzaSy') || arg.length < 30) {
+    return ctx.reply('❌ Invalid Gemini API key format. It should start with "AIzaSy" and be at least 30 characters long.');
+  }
+
+  await ctx.reply('🔒 Saving your custom Gemini API key...', { parse_mode: 'HTML' });
+
+  try {
+    await api.saveGeminiKey(user.id, arg);
+    await ctx.reply(
+      `✅ <b>Gemini API Key saved successfully!</b>\n\n` +
+      `Your autonomous agents and reasoning tasks will now use your own API key. You will not be billed on the shared account.`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err: any) {
+    await ctx.reply(`❌ Failed to save API Key: ${err?.response?.data?.message ?? err.message}`);
+  }
+});
+
+bot.command('status', async (ctx) => {
+  const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
+  if (!user) return ctx.reply('⚠️ Could not reach the server.');
+
+  const activeRepo = await api.getActiveRepo(user.id).catch(() => null);
+  const maskedKey = maskApiKey(user.geminiApiKey);
+  const githubStatus = user.githubLogin ? `@${user.githubLogin}` : 'Not connected';
+  const repoStatus = activeRepo ? `<code>${activeRepo.fullName}</code> (${activeRepo.defaultBranch})` : 'No active repo';
+
+  await ctx.reply(
+    `<b>Telecode Status</b>\n\n` +
+    `Gemini key: <code>${maskedKey}</code>\n` +
+    `GitHub: <b>${githubStatus}</b>\n` +
+    `Active repo: ${repoStatus}\n\n` +
+    `You can chat normally with me, or use commands like /help, /explain, /plan, /fix, and /execute.`,
+    { parse_mode: 'HTML' }
+  );
 });
 
 /** /repos — list connected repositories */
@@ -303,19 +436,43 @@ bot.command('execute', async (ctx) => {
     prompt,
   });
 
-  // Confirm before executing
-  await ctx.reply(
-    `⚡ <b>Execute mode</b> — I will make code changes to <code>${activeRepo.fullName}</code>.\n\n` +
-    `Task: <i>"${prompt}"</i>\n\n` +
-    `This will create a new branch and open a PR. Confirm?`,
-    {
-      parse_mode: 'HTML',
-      ...Markup.inlineKeyboard([
-        Markup.button.callback('✅ Confirm', `exec_confirm:${pendingId}`),
-        Markup.button.callback('❌ Cancel', `exec_cancel:${pendingId}`),
-      ]),
-    }
+  // Find the last completed task with a branch name for this repository to allow continuity
+  const tasks = await api.listTasks(user.id).catch(() => []);
+  const lastTaskWithBranch = tasks.find(
+    (t: any) => t.repositoryId === activeRepo.id && t.branchName && t.status === 'COMPLETED'
   );
+
+  if (lastTaskWithBranch) {
+    await ctx.reply(
+      `⚡ <b>Execute mode</b> — I will make code changes to <code>${activeRepo.fullName}</code>.\n\n` +
+      `Task: <i>"${prompt}"</i>\n\n` +
+      `I detected a recently completed feature branch: <code>${lastTaskWithBranch.branchName}</code>. Do you want to build on top of it, or start fresh from main?`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(`🌿 Continue on ${lastTaskWithBranch.branchName.split('/').pop()}`, `exec_confirm:${pendingId}:${lastTaskWithBranch.branchName}`)],
+          [
+            Markup.button.callback('🆕 Start fresh from main', `exec_confirm:${pendingId}:new`),
+            Markup.button.callback('❌ Cancel', `exec_cancel:${pendingId}`),
+          ]
+        ]),
+      }
+    );
+  } else {
+    // Confirm before executing
+    await ctx.reply(
+      `⚡ <b>Execute mode</b> — I will make code changes to <code>${activeRepo.fullName}</code>.\n\n` +
+      `Task: <i>"${prompt}"</i>\n\n` +
+      `This will create a new branch and open a PR. Confirm?`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          Markup.button.callback('✅ Confirm', `exec_confirm:${pendingId}:new`),
+          Markup.button.callback('❌ Cancel', `exec_cancel:${pendingId}`),
+        ]),
+      }
+    );
+  }
 });
 
 bot.action(/^exec_cancel:(.+)$/, async (ctx) => {
@@ -347,8 +504,9 @@ bot.action(/^deny_task:(.+)$/, async (ctx) => {
   }
 });
 
-bot.action(/^exec_confirm:(.+)$/, async (ctx) => {
+bot.action(/^exec_confirm:(.+?):(.+)$/, async (ctx) => {
   const pendingId = ctx.match[1];
+  const targetBranchOption = ctx.match[2];
   const pending = pendingExecutions.get(pendingId);
 
   if (!pending) {
@@ -360,6 +518,8 @@ bot.action(/^exec_confirm:(.+)$/, async (ctx) => {
   const { userId, repositoryId, prompt } = pending;
   pendingExecutions.delete(pendingId); // Clean up
 
+  const baseBranch = targetBranchOption === 'new' ? undefined : targetBranchOption;
+
   try {
     if (!ctx.chat) return;
     const task = await api.submitTask({
@@ -369,10 +529,11 @@ bot.action(/^exec_confirm:(.+)$/, async (ctx) => {
       prompt,
       botToken,
       chatId: String(ctx.chat.id),
+      baseBranch,
     });
     await ctx.editMessageText(
       `⚡ <b>Phase 3: Execution</b> — ID: <code>${task.id}</code>\n\n` +
-      `<i>AI is applying changes and opening a PR. You'll be notified when it's live.</i>`,
+      `<i>AI is applying changes on branch: <code>${baseBranch || 'new branch from main'}</code>. You'll be notified when it's live!</i>`,
       { parse_mode: 'HTML' }
     );
   } catch (err: any) {
@@ -419,27 +580,23 @@ bot.command(['login', 'auth'], async (ctx) => {
   const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
   if (!user) return ctx.reply('⚠️ Could not reach the server.');
 
-  const clientId = process.env.GITHUB_CLIENT_ID;
-  const redirectUri = process.env.GITHUB_REDIRECT_URI;
+  try {
+    const authUrl = await api.getGithubLoginUrl(user.id);
 
-  if (!clientId || !redirectUri) {
-    return ctx.reply('⚠️ GitHub OAuth is not fully configured on the server.');
+    await ctx.reply(
+      `🔐 <b>GitHub Account Connection</b>\n\n` +
+      `Connect your GitHub account to allow Telecode to safely create branches, commit code, and open PRs on your behalf.\n\n` +
+      `This link is single-use and expires soon for safety.`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          Markup.button.url('🔑 Connect GitHub', authUrl),
+        ]),
+      }
+    );
+  } catch (err: any) {
+    await ctx.reply(`❌ Failed to start GitHub login: ${err?.response?.data?.message ?? err.message}`);
   }
-
-  const telegramId = ctx.from.id;
-  const authUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${telegramId}&scope=repo`;
-
-  await ctx.reply(
-    `🔐 <b>GitHub Account Connection</b>\n\n` +
-    `Connect your GitHub account to allow Telecode to safely create branches, commit code, and open PRs on your behalf.\n\n` +
-    `Click the button below to authorize through GitHub securely:`,
-    {
-      parse_mode: 'HTML',
-      ...Markup.inlineKeyboard([
-        Markup.button.url('🔑 Connect GitHub', authUrl),
-      ]),
-    }
-  );
 });
 
 /** /tasks — recent history */
@@ -472,27 +629,46 @@ bot.on(message('text'), async (ctx) => {
   const user = await ensureUser(ctx.from.id, ctx.from).catch(() => null);
   if (!user) return ctx.reply('⚠️ Could not reach the server. Is it running?');
 
-  const activeRepo = await api.getActiveRepo(user.id).catch(() => null);
+  // Interactive Onboarding: Capture API key if missing
+  if (!user.geminiApiKey) {
+    if (text.startsWith('AIzaSy') && text.length >= 30) {
+      await ctx.reply('🔒 Saving your custom Gemini API key...', { parse_mode: 'HTML' });
+      try {
+        await api.saveGeminiKey(user.id, text);
+        await ctx.reply(
+          `🎉 <b>Setup Complete!</b>\n\n` +
+          `Your Gemini API Key has been saved successfully. You are now ready to write, explain, and execute code!\n\n` +
+          `<b>Next Steps:</b>\n` +
+          `🔑 <b>/login</b> — Link your GitHub account\n` +
+          `📋 <b>/connect owner/repo</b> — Link a repository to code against`,
+          { parse_mode: 'HTML' }
+        );
+      } catch (err: any) {
+        await ctx.reply(`❌ Failed to save API Key: ${err?.response?.data?.message ?? err.message}`);
+      }
+    } else {
+      await ctx.reply(
+        `⚠️ <b>Setup Required</b>\n\n` +
+        `Before you can run AI tasks, please set up your personal Gemini API Key.\n\n` +
+        `👉 **Please send your Gemini API Key** (starting with <code>AIzaSy</code>) as a text message now to complete the setup.`,
+        { parse_mode: 'HTML' }
+      );
+    }
+    return;
+  }
 
-  await ctx.reply(
-    `💬 Treating this as an <b>Explain</b> request...\n\n` +
-    `${activeRepo ? `Repo: <code>${activeRepo.fullName}</code>` : '<i>(No active repo — link one with /connect)</i>'}\n\n` +
-    `💡 <i>Tip: Use /fix or /plan for deeper tasks.</i>`,
-    { parse_mode: 'HTML' }
-  );
+  // Show inline thinking message
+  const thinkingMsg = await ctx.reply('💬 <i>Thinking...</i>', { parse_mode: 'HTML' });
 
   try {
-    if (!ctx.chat) return;
-    await api.submitTask({
-      userId: user.id,
-      repositoryId: activeRepo?.id,
-      mode: 'EXPLAIN',
-      prompt: text,
-      botToken,
-      chatId: String(ctx.chat.id),
-    });
-  } catch {
-    // silently queue even if server is slow
+    const reply = await api.chatInline(user.id, text);
+    // Delete thinking message and send direct response
+    await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => null);
+    await sendLongMessage(ctx, reply);
+  } catch (err: any) {
+    await ctx.telegram.deleteMessage(ctx.chat.id, thinkingMsg.message_id).catch(() => null);
+    const errorMsg = err.response?.data?.message || err.message;
+    await ctx.reply(`❌ Error: ${errorMsg}`);
   }
 });
 
@@ -516,7 +692,9 @@ async function launch() {
     await bot.telegram.setMyCommands([
       { command: 'start', description: 'Begin your journey with Telecode' },
       { command: 'connect', description: 'Link a GitHub repository' },
+      { command: 'create', description: 'Create a new public/private repository on GitHub' },
       { command: 'repos', description: 'List your connected repositories' },
+      { command: 'status', description: 'Show your Telecode account and key status' },
       { command: 'explain', description: 'Understand code or concepts' },
       { command: 'search', description: 'Hunt for logic in your codebase' },
       { command: 'plan', description: 'Strategy for a new feature' },
@@ -524,6 +702,7 @@ async function launch() {
       { command: 'execute', description: 'Apply code changes & open PR' },
       { command: 'tasks', description: 'View recent execution history' },
       { command: 'sync', description: 'Get code for VS Code extension' },
+      { command: 'apikey', description: 'Set or view your Gemini API Key status' },
       { command: 'login', description: 'Link your GitHub account securely' },
       { command: 'undo', description: 'Roll back the last execution' },
       { command: 'help', description: 'Show full command reference' },

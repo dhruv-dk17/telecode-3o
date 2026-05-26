@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import asyncio
+import subprocess
 from typing import Tuple, Optional
 
 
@@ -21,6 +22,27 @@ class SandboxClient:
         self.local_dir = None
         self.workspace_dir = None
         self.modified_files = set()  # Tracks files modified during this session
+
+    async def _run_local_process(
+        self,
+        args_or_command,
+        cwd: Optional[str] = None,
+        shell: bool = False,
+    ) -> tuple[str, str, int]:
+        """Run a local process in a Windows-safe way without relying on asyncio subprocess support."""
+        def _run():
+            completed = subprocess.run(
+                args_or_command,
+                cwd=cwd,
+                shell=shell,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            return completed.stdout, completed.stderr, completed.returncode
+
+        return await asyncio.to_thread(_run)
 
     async def initialize(self) -> None:
         """Sets up the sandbox and clones the repository."""
@@ -59,30 +81,21 @@ class SandboxClient:
         repo_url = f"https://x-access-token:{self.github_token}@github.com/{self.repo_full_name}.git"
         print(f"[Sandbox] Cloning {self.repo_full_name} locally...")
         
-        # Run clone command securely
-        cmd = f"git clone -b {self.base_branch} {repo_url} \"{self.workspace_dir}\""
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        stdout, stderr, exit_code = await self._run_local_process(
+            ["git", "clone", "-b", self.base_branch, repo_url, self.workspace_dir]
         )
-        stdout, stderr = await proc.communicate()
         
-        if proc.returncode != 0:
-            err_str = stderr.decode(errors="replace")
+        if exit_code != 0:
+            err_str = stderr
             print(f"[Sandbox] Local clone failed: {err_str}")
             # Try to clone without token (public repo fallback or clean debug)
             public_url = f"https://github.com/{self.repo_full_name}.git"
             print(f"[Sandbox] Retrying public URL clone: {public_url}...")
-            retry_cmd = f"git clone -b {self.base_branch} {public_url} \"{self.workspace_dir}\""
-            retry_proc = await asyncio.create_subprocess_shell(
-                retry_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            stdout, stderr, retry_exit_code = await self._run_local_process(
+                ["git", "clone", "-b", self.base_branch, public_url, self.workspace_dir]
             )
-            stdout, stderr = await retry_proc.communicate()
-            if retry_proc.returncode != 0:
-                raise Exception(f"Failed to clone repository: {stderr.decode(errors='replace')}")
+            if retry_exit_code != 0:
+                raise Exception(f"Failed to clone repository: {stderr}")
                 
         print(f"[Sandbox] Local workspace ready at: {self.workspace_dir}")
 
@@ -93,19 +106,12 @@ class SandboxClient:
             return res.stdout, res.stderr, res.exit_code
         else:
             print(f"[Sandbox] Local execution: {command}")
-            # Limit command injection risk, though we trust our AI model.
-            proc = await asyncio.create_subprocess_shell(
+            stdout, stderr, exit_code = await self._run_local_process(
                 command,
                 cwd=self.workspace_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                shell=True,
             )
-            stdout, stderr = await proc.communicate()
-            return (
-                stdout.decode(errors="replace"),
-                stderr.decode(errors="replace"),
-                proc.returncode
-            )
+            return (stdout, stderr, exit_code)
 
     async def read_file(self, path: str) -> str:
         """Reads a file from the workspace."""

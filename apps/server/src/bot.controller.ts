@@ -10,6 +10,7 @@ import {
   Res,
   Sse,
   MessageEvent,
+  BadRequestException,
 } from '@nestjs/common';
 import * as express from 'express';
 import axios from 'axios';
@@ -20,6 +21,7 @@ import { RepositoriesService } from './repositories/repositories.service';
 import { TasksService, CreateTaskDto } from './tasks/tasks.service';
 import { WorkerService } from './worker/worker.service';
 import { SyncCodesService } from './users/sync-codes.service';
+import { GithubOAuthService } from './users/github-oauth.service';
 import { SessionsService } from './sessions/sessions.service';
 import { ProgressService } from './progress/progress.service';
 import { TaskMode, TaskStatus } from '@prisma/client';
@@ -40,6 +42,16 @@ export class ConnectRepoDto {
   defaultBranch?: string;
 }
 
+export class CreateRepoDto {
+  userId: string;
+  name: string;
+  private?: boolean;
+}
+
+export class GithubLoginDto {
+  userId: string;
+}
+
 export class SubmitTaskDto {
   userId: string;
   repositoryId?: string;
@@ -47,6 +59,7 @@ export class SubmitTaskDto {
   prompt: string;
   botToken: string;   // Required for worker to push results
   chatId: string;     // Required for worker to push results
+  baseBranch?: string;
 }
 
 export class UpdateTaskDto {
@@ -54,6 +67,11 @@ export class UpdateTaskDto {
   result?: string;
   branchName?: string;
   prUrl?: string;
+}
+
+export class ChatDto {
+  userId: string;
+  prompt: string;
 }
 
 // ── Controller ───────────────────────────────────────────────────────────────
@@ -66,6 +84,7 @@ export class BotController {
     private readonly tasks: TasksService,
     private readonly worker: WorkerService,
     private readonly syncCodes: SyncCodesService,
+    private readonly githubOAuth: GithubOAuthService,
     private readonly sessions: SessionsService,
     private readonly progressService: ProgressService,
   ) {}
@@ -91,6 +110,16 @@ export class BotController {
     return { user };
   }
 
+  @Post('users/:userId/gemini-key')
+  @HttpCode(HttpStatus.OK)
+  async saveGeminiKey(
+    @Param('userId') userId: string,
+    @Body() body: { geminiApiKey: string },
+  ) {
+    const user = await this.users.updateGeminiApiKey(userId, body.geminiApiKey);
+    return { user };
+  }
+
   // ─ Repositories ──────────────────────────────────────────────────────────
 
   @Post('repos/connect')
@@ -102,6 +131,42 @@ export class BotController {
       dto.defaultBranch,
     );
     return { repo };
+  }
+
+  @Post('repos/create')
+  @HttpCode(HttpStatus.CREATED)
+  async createRepo(@Body() dto: CreateRepoDto) {
+    const user = await this.users.findById(dto.userId);
+    if (!user || !user.githubToken) {
+      throw new BadRequestException('You must connect your GitHub account first. Run /login in the Telegram bot.');
+    }
+
+    try {
+      const response = await axios.post(
+        'https://api.github.com/user/repos',
+        {
+          name: dto.name,
+          private: dto.private ?? true,
+          auto_init: true,
+        },
+        {
+          headers: {
+            Authorization: `token ${user.githubToken}`,
+            Accept: 'application/vnd.github.v3+json',
+            'User-Agent': 'Telecode-App',
+          },
+        },
+      );
+
+      const repoFullName = response.data.full_name;
+      const defaultBranch = response.data.default_branch || 'main';
+
+      const repo = await this.repos.connect(dto.userId, repoFullName, defaultBranch);
+      return { repo };
+    } catch (err: any) {
+      const errorMsg = err.response?.data?.message || err.message;
+      throw new BadRequestException(`GitHub API error: ${errorMsg}`);
+    }
   }
 
   @Get('repos/:userId')
@@ -146,7 +211,7 @@ export class BotController {
     this.worker.dispatch({
       task,
       repoFullName,
-      repoDefaultBranch,
+      repoDefaultBranch: dto.baseBranch || repoDefaultBranch,
       botToken: dto.botToken,
       chatId: dto.chatId,
       sessionContext,
@@ -273,21 +338,55 @@ export class BotController {
     return { apiToken };
   }
 
+  @Post('github/login')
+  @HttpCode(HttpStatus.OK)
+  async githubLogin(@Body() body: GithubLoginDto) {
+    const user = await this.users.findById(body.userId);
+    if (!user) {
+      throw new BadRequestException('User not found');
+    }
+
+    const clientId = process.env.GITHUB_CLIENT_ID;
+    const redirectUri = process.env.GITHUB_REDIRECT_URI;
+
+    if (!clientId || !redirectUri) {
+      throw new BadRequestException('GitHub OAuth is not configured on the server');
+    }
+
+    const state = await this.githubOAuth.createState(user.id);
+    const authUrl =
+      `https://github.com/login/oauth/authorize` +
+      `?client_id=${encodeURIComponent(clientId)}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&scope=${encodeURIComponent('repo')}` +
+      `&state=${encodeURIComponent(state)}`;
+
+    return { authUrl };
+  }
+
   @Get('github/callback')
   async githubCallback(
     @Query('code') code: string,
-    @Query('state') state: string, // state contains telegramId
+    @Query('state') state: string,
     @Res() res: express.Response,
   ) {
-    const clientId = process.env.GITHUB_CLIENT_ID || 'Ov23liz6u286u286u286';
-    const clientSecret = process.env.GITHUB_CLIENT_SECRET || 'github_pat_11AAAAAAA_BBBBBBBBB';
+    const clientId = process.env.GITHUB_CLIENT_ID;
+    const clientSecret = process.env.GITHUB_CLIENT_SECRET;
 
     try {
+      if (!clientId || !clientSecret) {
+        throw new Error('GitHub OAuth is not configured on the server');
+      }
+
       if (!code || !state) {
         throw new Error('Missing code or state parameter');
       }
 
-      // 1. Exchange OAuth code for access token
+      const oauthState = await this.githubOAuth.consumeState(state);
+      if (!oauthState) {
+        throw new Error('Invalid or expired OAuth state. Please run /login again.');
+      }
+
       const tokenResponse = await axios.post(
         'https://github.com/login/oauth/access_token',
         {
@@ -307,7 +406,6 @@ export class BotController {
         throw new Error(`Failed to exchange code: ${JSON.stringify(tokenResponse.data)}`);
       }
 
-      // 2. Fetch authenticated GitHub user details
       const userResponse = await axios.get('https://api.github.com/user', {
         headers: {
           Authorization: `token ${accessToken}`,
@@ -316,15 +414,13 @@ export class BotController {
 
       const githubLogin = userResponse.data.login;
 
-      // 3. Save githubToken and githubLogin to User in DB
-      await this.users.updateGithubToken(state, accessToken, githubLogin);
+      await this.users.updateGithubConnection(oauthState.userId, accessToken, githubLogin);
 
-      // 4. Notify user via Telegram Bot
       const botToken = process.env.TELEGRAM_BOT_TOKEN;
-      if (botToken) {
+      if (botToken && oauthState.user.telegramId) {
         try {
           await axios.post(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            chat_id: state,
+            chat_id: oauthState.user.telegramId,
             text: `✅ <b>GitHub Linked successfully!</b>\n\nConnected as: <code>@${githubLogin}</code>.\nYou can now run /plan, /fix, and /execute commands on your repositories securely!`,
             parse_mode: 'HTML',
           });
@@ -333,7 +429,6 @@ export class BotController {
         }
       }
 
-      // 5. Send highly premium HTML Success page response
       res.setHeader('Content-Type', 'text/html');
       res.send(`
         <!DOCTYPE html>
@@ -507,6 +602,39 @@ export class BotController {
   async getApproval(@Param('id') id: string) {
     const approved = this.progressService.getAndClearApproval(id);
     return { approved };
+  }
+
+  @Post('chat')
+  @HttpCode(HttpStatus.OK)
+  async chatInline(@Body() dto: ChatDto) {
+    const user = await this.users.findById(dto.userId);
+    const geminiKey = user?.geminiApiKey ?? process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      throw new BadRequestException('Gemini API Key is not configured. Please set one using /apikey in Telegram.');
+    }
+
+    try {
+      const workerUrl = process.env.WORKER_URL ?? 'http://localhost:8000';
+      const workerSecret = process.env.WORKER_SECRET ?? 'telecode-worker-secret-change-in-prod';
+
+      const response = await axios.post(
+        `${workerUrl}/chat`,
+        {
+          prompt: dto.prompt,
+          gemini_api_key: geminiKey,
+        },
+        {
+          headers: {
+            'X-Worker-Secret': workerSecret,
+          },
+          timeout: 45_000,
+        }
+      );
+      return { result: response.data.result };
+    } catch (err: any) {
+      const errorMsg = err.response?.data?.detail || err.message;
+      throw new BadRequestException(`AI Worker error: ${errorMsg}`);
+    }
   }
 
   @Sse('progress/stream/:token')

@@ -40,4 +40,25 @@ describe('UsersService', () => {
     expect(result).toEqual(mockUser);
     expect(prisma.user.create).toHaveBeenCalledWith({ data: { telegramId: '123' } });
   });
+
+  it('should update the GitHub connection for a user', async () => {
+    const mockUser = {
+      id: '1',
+      telegramId: '123',
+      githubToken: 'token',
+      githubLogin: 'octocat',
+    };
+    (prisma.user.update as jest.Mock).mockResolvedValue(mockUser);
+
+    const result = await service.updateGithubConnection('1', 'token', 'octocat');
+
+    expect(result).toEqual(mockUser);
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: '1' },
+      data: {
+        githubToken: 'token',
+        githubLogin: 'octocat',
+      },
+    });
+  });
 });

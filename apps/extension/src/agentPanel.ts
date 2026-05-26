@@ -417,7 +417,7 @@ export class AgentPanelProvider implements vscode.WebviewViewProvider {
               <div class="step-header">
                 <div class="step-icon" id="icon-\${stepNum}">\${icon}</div>
                 <div class="step-info">
-                  <div class="step-title">Step \${stepNum}: <span id="label-\&num;\${stepNum}">\${label}</span></div>
+                  <div class="step-title">Step \${stepNum}: <span id="label-&num;\${stepNum}">\${label}</span></div>
                   <div class="step-status" id="status-\${stepNum}">\${status}</div>
                 </div>
               </div>

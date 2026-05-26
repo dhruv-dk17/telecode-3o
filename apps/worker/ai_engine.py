@@ -8,6 +8,10 @@ Modes:
              and creates a simulated pull request with full file contents.
 """
 
+import asyncio
+import os
+from functools import lru_cache
+
 from google import genai
 from google.genai import types as genai_types
 from config import settings
@@ -16,14 +20,107 @@ from config import settings
 _client: genai.Client | None = None
 
 
-def _get_client() -> genai.Client:
+def _get_client(api_key: str | None = None) -> genai.Client:
     global _client
+    if api_key:
+        return genai.Client(api_key=api_key)
     if _client is None:
         _client = genai.Client(api_key=settings.gemini_api_key)
     return _client
 
 
 MODEL = "gemini-3-flash-preview"  # Fast, cost-effective; swap to gemini-3-pro-preview for deeper reasoning
+DEFAULT_MODEL_FALLBACKS = [
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+]
+
+
+def get_model_candidates() -> list[str]:
+    configured = os.environ.get("GEMINI_MODEL_FALLBACKS", "").strip()
+    if configured:
+        models = [model.strip() for model in configured.split(",") if model.strip()]
+        if models:
+            return models
+    return DEFAULT_MODEL_FALLBACKS.copy()
+
+
+def is_rate_limit_error(err: Exception) -> bool:
+    err_msg = str(err)
+    return "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower()
+
+
+def is_daily_quota_error(err: Exception) -> bool:
+    err_msg = str(err).lower()
+    return (
+        "generaterequestsperday" in err_msg
+        or "perday" in err_msg
+        or "free_tier_requests" in err_msg
+        or "quota exceeded for metric" in err_msg
+    )
+
+
+def extract_retry_delay(err: Exception, default_delay: float = 5.0) -> float:
+    err_msg = str(err)
+    match = _re.search(r"retry in ([\d\.]+)s", err_msg, _re.IGNORECASE)
+    if match:
+        return float(match.group(1)) + 1.5
+
+    match = _re.search(r"retryDelay': '(\d+)s'", err_msg)
+    if match:
+        return float(match.group(1)) + 1.5
+
+    return default_delay
+
+
+async def generate_content_with_fallback(
+    client: genai.Client,
+    contents,
+    config: genai_types.GenerateContentConfig,
+    models: list[str] | None = None,
+):
+    candidate_models = models or get_model_candidates()
+    failures: list[str] = []
+
+    for model_name in candidate_models:
+        print(f"[Gemini] Trying model: {model_name}")
+        max_retries = 2
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+                if model_name != candidate_models[0]:
+                    print(f"[Gemini] Fallback model succeeded: {model_name}")
+                return response, model_name
+            except Exception as err:
+                if is_rate_limit_error(err):
+                    if is_daily_quota_error(err):
+                        failures.append(f"{model_name}: daily/model quota exhausted")
+                        print(f"[Gemini] Model quota exhausted for {model_name}. Trying next fallback.")
+                        break
+
+                    if attempt < max_retries:
+                        delay = extract_retry_delay(err, default_delay=5.0 * (attempt + 1))
+                        print(f"[Gemini] Temporary rate limit on {model_name}. Retrying in {delay:.2f}s...")
+                        await asyncio.sleep(delay)
+                        continue
+
+                failures.append(f"{model_name}: {str(err)}")
+                print(f"[Gemini] Model failed: {model_name} -> {err}")
+                break
+
+    failure_summary = "\n".join(failures)
+    raise Exception(
+        "All configured Gemini models failed.\n"
+        f"Tried: {', '.join(candidate_models)}\n"
+        f"Details:\n{failure_summary}"
+    )
 
 
 # ── Security: Sensitive path filter ─────────────────────────────────────────
@@ -74,6 +171,7 @@ Your current mode is EXPLAIN.
 The user wants to understand code, a concept, or get a quick answer.
 - Keep responses under 400 words unless complexity demands more.
 - Use code blocks with language hints for all code examples.
+- If the question is about Telecode itself, answer as a built-in Telecode support assistant that knows the bot commands, setup flow, GitHub login, sync flow, AI modes, and common troubleshooting steps.
 - End with a one-line "Key takeaway: ..." summary."""
 
 _SYSTEM_SEARCH = _SYSTEM_BASE + """
@@ -234,6 +332,72 @@ def _build_context(repo_full_name: str | None, repo_branch: str | None) -> str:
     )
 
 
+def _project_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _read_text_if_exists(path: str, max_chars: int) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(max_chars)
+    except Exception:
+        return ""
+
+
+@lru_cache(maxsize=1)
+def _build_telecode_self_knowledge() -> str:
+    root = _project_root()
+    spec_text = _read_text_if_exists(os.path.join(root, "SPEC.md"), 6000)
+    prd_text = _read_text_if_exists(os.path.join(root, "PRD.md"), 8000)
+    bot_main = _read_text_if_exists(os.path.join(root, "apps", "bot", "src", "main.ts"), 14000)
+
+    command_lines: list[str] = []
+    if bot_main:
+        import re
+        single_commands = re.findall(r"bot\.command\('([^']+)'", bot_main)
+        array_commands = re.findall(r"bot\.command\(\[([^\]]+)\]", bot_main)
+        seen = set()
+
+        for command in single_commands:
+            cmd = f"/{command}"
+            if cmd not in seen:
+                seen.add(cmd)
+                command_lines.append(cmd)
+
+        for group in array_commands:
+            for alias in re.findall(r"'([^']+)'", group):
+                cmd = f"/{alias}"
+                if cmd not in seen:
+                    seen.add(cmd)
+                    command_lines.append(cmd)
+
+    command_summary = ", ".join(command_lines) if command_lines else "No command list available."
+
+    return (
+        "Telecode Internal Knowledge Base\n"
+        "Commands currently implemented:\n"
+        f"{command_summary}\n\n"
+        "SPEC.md excerpt:\n"
+        f"{spec_text}\n\n"
+        "PRD.md excerpt:\n"
+        f"{prd_text}"
+    ).strip()
+
+
+def _should_inject_telecode_knowledge(mode: str, prompt: str, repo_full_name: str | None) -> bool:
+    if mode != "EXPLAIN":
+        return False
+
+    prompt_lower = prompt.lower()
+    telecode_keywords = [
+        "telecode", "telegram bot", "bot", "command", "how to use", "how do i use",
+        "apikey", "api key", "sync", "login", "github", "connect", "repo", "execute",
+        "plan", "fix", "search", "explain", "undo", "task", "error", "failed",
+        "quota", "pull request", "pr", "extension", "status",
+    ]
+    return repo_full_name is None or any(keyword in prompt_lower for keyword in telecode_keywords)
+
+
 # ── Public interface ─────────────────────────────────────────────────────────
 
 async def process_task(
@@ -243,12 +407,13 @@ async def process_task(
     repo_default_branch: str | None = None,
     github_token: str | None = None,
     session_context: str | None = None,
+    gemini_api_key: str | None = None,
 ) -> dict:
     """
     Send the task to Gemini and return a structured result dict.
     Returns: { "result": str, "branch_name": str | None, "confidence_score": int | None, ... }
     """
-    client = _get_client()
+    client = _get_client(gemini_api_key)
 
     system_map = {
         "EXPLAIN": _SYSTEM_EXPLAIN,
@@ -312,11 +477,15 @@ async def process_task(
     if session_context:
         prompt = f"## 🧠 Previous Session Memory\n{session_context}\n\n---\n\n{prompt}"
 
+    if _should_inject_telecode_knowledge(mode, prompt, repo_full_name):
+        telecode_context = _build_telecode_self_knowledge()
+        prompt = f"## Telecode Internal Product Context\n{telecode_context}\n\n---\n\n{prompt}"
+
     context = _build_context(repo_full_name, repo_default_branch)
     user_message = f"{context}\n\n---\n\n{prompt}"
 
-    response = await client.aio.models.generate_content(
-        model=MODEL,
+    response, _model_used = await generate_content_with_fallback(
+        client=client,
         contents=user_message,
         config=genai_types.GenerateContentConfig(
             system_instruction=system_instruction,

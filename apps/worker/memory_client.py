@@ -23,7 +23,8 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
 
 
 class SemanticMemoryClient:
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key
         self.db_path = os.path.join(os.path.dirname(__file__), "scratch", "memory.db")
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._initialize_db()
@@ -49,7 +50,7 @@ class SemanticMemoryClient:
     async def get_embedding(self, text: str) -> List[float]:
         """Fetches the 768-dimension embedding vector from Gemini 3 API."""
         try:
-            client = genai.Client(api_key=settings.gemini_api_key)
+            client = genai.Client(api_key=self.api_key or settings.gemini_api_key)
             # Use standard text-embedding-004 model
             resp = await client.aio.models.embed_content(
                 model="text-embedding-004",

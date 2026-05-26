@@ -11,7 +11,7 @@ export class ApiService {
   constructor(baseURL?: string) {
     this.http = axios.create({
       baseURL: baseURL ?? process.env.SERVER_URL ?? 'http://localhost:3001/api',
-      timeout: 10_000,
+      timeout: 45_000,
     });
   }
 
@@ -43,6 +43,15 @@ export class ApiService {
     return res.data.repo;
   }
 
+  async createRepo(userId: string, name: string, isPrivate = true) {
+    const res = await this.http.post('/bot/repos/create', {
+      userId,
+      name,
+      private: isPrivate,
+    });
+    return res.data.repo;
+  }
+
   async listRepos(userId: string) {
     const res = await this.http.get(`/bot/repos/${userId}`);
     return res.data.repos;
@@ -62,6 +71,7 @@ export class ApiService {
     prompt: string;
     botToken: string;
     chatId: string;
+    baseBranch?: string;
   }) {
     const res = await this.http.post('/bot/tasks', data);
     return res.data.task;
@@ -91,11 +101,28 @@ export class ApiService {
     return res.data.code;
   }
 
+  async getGithubLoginUrl(userId: string) {
+    const res = await this.http.post('/bot/github/login', { userId });
+    return res.data.authUrl;
+  }
+
+  async saveGeminiKey(userId: string, geminiApiKey: string) {
+    const res = await this.http.post(`/bot/users/${userId}/gemini-key`, {
+      geminiApiKey,
+    });
+    return res.data.user;
+  }
+
   async approveTask(taskId: string, approved: boolean) {
     const res = await this.http.post(`/bot/tasks/${taskId}/approve`, {
       userId: 'bot-override',
       approved,
     });
     return res.data;
+  }
+
+  async chatInline(userId: string, prompt: string) {
+    const res = await this.http.post('/bot/chat', { userId, prompt });
+    return res.data.result;
   }
 }

@@ -50,5 +50,11 @@ class ProcessTaskRequest(BaseModel):
     repo_full_name: Optional[str] = None
     repo_default_branch: Optional[str] = None
     github_token: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     session_context: Optional[str] = None  # Phase B: injected session memory
+
+
+class ChatRequest(BaseModel):
+    prompt: str
+    gemini_api_key: Optional[str] = None
 

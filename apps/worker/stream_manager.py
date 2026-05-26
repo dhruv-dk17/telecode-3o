@@ -3,6 +3,19 @@ stream_manager.py — Real-time progress streaming for Telecode agent.
 Posts and edits Telegram messages live, and streams updates to NestJS.
 """
 
+import sys
+# Force stdout/stderr to use UTF-8 on Windows to prevent UnicodeEncodeError with emojis
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+if sys.stderr.encoding != 'utf-8':
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
 import httpx
 import html
 import asyncio
